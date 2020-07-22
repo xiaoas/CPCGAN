@@ -1,6 +1,7 @@
 from torch.utils import data
 import h5py
 import torch
+import os
 class Clddata(data.Dataset):
     def __init__(self, path: str, fname: str):
         with open(path + fname, 'r') as f:
@@ -21,7 +22,13 @@ class Clddata(data.Dataset):
             self.label_seg = torch.cat(label_seg)
             self.device = torch.device('cuda:1')
             # print('smallest pc:', self.pts_num.min().item())
-        self.struct, self.struct_label_seg = self.genstruc(self.label_seg.max() + 1)
+        strctsaveName = path + '../code/' + fname + '.strct'
+        if not os.path.isfile(strctsaveName):
+            self.struct, self.struct_label_seg = self.genstruc(self.label_seg.max() + 1)
+            torch.save({'struct': self.struct, 'struct_label_seg':self.struct_label_seg}, strctsaveName)
+        else:
+            strct = torch.load(strctsaveName)
+            self.struct, self.struct_label_seg = strct['struct'], strct['struct_label_seg']
     def __len__(self):
         return len(self.pts)
     def __getitem__(self, idx):
@@ -52,7 +59,7 @@ class Clddata(data.Dataset):
                 subcld = cld[lbls == segl]
                 sampleid = torch.randperm(len(subcld))[:cnt]
                 samples = subcld[sampleid] # %cnt% samples in the subcld, initial means
-                for iter in range(0):
+                for iter in range(100):
                     diff = subcld[:, None, :] - samples[None, :, :]
                     diff = torch.norm(diff, dim= -1)
                     cate = torch.argmin(diff, dim = -1) # vis.scatter(subcld,cate + 1)
