@@ -9,10 +9,12 @@ class StructGen(nn.Module):
     def __init__(self):
         super(StructGen, self).__init__()
         self.mlp1 = nn.Sequential(
-            nn.Linear(96, 96),
-            nn.ReLU(),
+            # nn.Linear(96, 96),
+            # nn.LeakyReLU(0.2),
             nn.Linear(96, 256),
-            nn.ReLU()
+            nn.LeakyReLU(0.2),
+            nn.Linear(256, 256),
+            nn.LeakyReLU(0.2)
         )
         self.fc1 = nn.Linear(256, 32 * c)
         self.fc2 = nn.Linear(256, 32 * 3)
@@ -35,9 +37,14 @@ class FinalGen(nn.Module):
         super(FinalGen, self).__init__()
         self.mlp = nn.Sequential(
             nn.Linear(99 + c, 96),
-            nn.ReLU(),
+            nn.LeakyReLU(0.2),
+            # nn.Linear(96, 96),
+            # nn.LeakyReLU(0.2),
             nn.Linear(96, 192)
         )
+        self.qm = nn.Linear(99 + c, 99 + c, bias= False)
+        self.km = nn.Linear(99 + c, 99 + c, bias= False)
+        self.vm = nn.Linear(99 + c, 99 + c)
         
     def forward(self, z_, GSS, GSP):
         """\
@@ -45,8 +52,9 @@ class FinalGen(nn.Module):
         """
         # print(z_.shape, GSS.shape, GSP.shape)
         x = torch.cat((z_, GSS, GSP), dim = -1) # (B, 32, 149)
-        m = x[:, :, None, :] * x[:, None, :, :]
-        m = torch.sum(m, -1) / 8 # / sqrt(149)
+        q, k, v = self.qm(x), self.km(x), self.vm(x)
+        m = q[:, :, None, :] * k[:, None, :, :]
+        m = torch.sum(m, -1)
         m = torch.softmax(m, -1)
         m @= x
         x = self.mlp(m).reshape(-1,32,64,3)
@@ -58,19 +66,21 @@ class StructDis(nn.Module):
         super(StructDis, self).__init__()
         self.mlp1 = nn.Sequential(
             nn.Linear(c+3, 64),
-            nn.ReLU(),
+            nn.LeakyReLU(0.2),
             nn.Linear(64, 128),
-            nn.ReLU(),
+            nn.LeakyReLU(0.2),
             nn.Linear(128, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1024)
+            nn.LeakyReLU(0.2),
+            nn.Linear(256, 2048)
         )
         self.mlp2 = nn.Sequential(
-            nn.Linear(1024, 512),
-            nn.ReLU(),
+            nn.Linear(2048, 512),
+            nn.LeakyReLU(0.2),
             nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1)
+            nn.LeakyReLU(0.2),
+            nn.Linear(256, 128),
+            nn.LeakyReLU(0.2),
+            nn.Linear(128, 1)
         )
     def forward(self, s, p):
         """\
@@ -100,15 +110,15 @@ if __name__ == '__main__':
     train_data = datap.Clddata('../data/', 'train_files.txt')
     val_data = datap.Clddata('../data/', 'val_files.txt')
     test_data = datap.Clddata('../data/', 'test_files.txt')
-    # # print some of the struct cloud for fun
+    # print some of the struct cloud for fun
     # for idx in range(3):
     #     cnt = train_data.pts_num[idx]
     #     pltt.plot(train_data.pts[idx,:cnt], train_data.label_seg[idx,:cnt])
     #     pltt.plot(train_data.struct[idx,:cnt], train_data.struct_label_seg[idx,:cnt])
-    BatchSize = 128
+    BatchSize = 32
     dataloader = DataLoader(train_data, batch_size= BatchSize, shuffle=True)
-    max_epoch_stage1 = 500
-    max_epoch_stage2 = 1500
+    max_epoch_stage1 = 128
+    max_epoch_stage2 = 256
     lambda_s = 0.5
     sgen = StructGen().to(device)
     sdis = StructDis().to(device)
@@ -139,7 +149,7 @@ if __name__ == '__main__':
                 gploss_f = gp(fdis, label_seg, pts, fs, fp)
                 Dsfake, Dsreal = sdis(gss, gsp).mean(), sdis(ss, sp).mean()
                 Dffake, Dfreal = fdis(fs, fp).mean(), fdis(label_seg, pts).mean()
-                lossD = lambda_s * (Dsfake - Dsreal) + Dffake - Dfreal + gploss_s + gploss_f
+                lossD = lambda_s * (Dsfake - Dsreal + gploss_s) + Dffake - Dfreal + gploss_f
                 optimD.zero_grad()
                 lossD.backward()
                 optimD.step()
@@ -158,37 +168,60 @@ if __name__ == '__main__':
                 print('batch', bid, 'lossD', lossD.item(), 'lossG', lossG.item())
                 print('\t', 'Dsfake', Dsfake.item(), 'Dsreal', Dsreal.item(), 'gploss_s', gploss_s.item())
                 print('\t', 'Dffake', Dffake.item(), 'Dfreal', Dfreal.item(), 'gploss_f', gploss_f.item())
-        """ # validation
-        Vsize = len(val_datag)
-        sgen_input = SGenDis.sample((Bsize,)).to(device)
-        # z_, gss, gsp = sgen(sgen_input)
-        sp, ss = val_datag['struct'].to(device), val_datag['struct_label_seg'].to(device)
-        z_ = sgen_input[:, None, :].repeat(1, 32, 1) """
-        torch.save({'sgenSD': sgen.state_dict(),
-                    'sdisSD': sdis.state_dict(),
-                    'fgenSD': fgen.state_dict(),
-                    'fdisSD': fdis.state_dict()}, f'SDs_{idx % 10}.pt')
-        if idx % 2 == 1:
+        # torch.save({'sgenSD': sgen.state_dict(),
+        #             'sdisSD': sdis.state_dict(),
+        #             'fgenSD': fgen.state_dict(),
+        #             'fdisSD': fdis.state_dict()}, f'SDs_{idx % 10}.pt')
+        if idx % 32 == 31:
             pltt.vis.text(f'epoch {idx} visualize')
             with torch.no_grad():
-                # show generated structure cloud
-                sgen_input = SGenDis.sample((2,)).to(device)
+            # show generated structure cloud
+                sgen_input = SGenDis.sample((8,)).to(device)
                 z_, gss, gsp = sgen(sgen_input)
                 print(gss.shape, gsp.shape)
                 for p, s in zip(gsp, gss):
                     pltt.plot(p, s)
                 # show ground truth and generated final cloud
                 if True:
-                    datas = train_data[:2]
-                    for idx in range(2):
+                    datas = train_data[:4]
+                    for idx in range(4):
                         pltt.plot(datas['pts'][idx], datas['label_seg'][idx])
-                    sp, ss = datas['struct'][:2].to(device), datas['struct_label_seg'][:2].to(device)
+                        pltt.plot(datas['struct'][idx], datas['struct_label_seg'][idx])
+                    sp, ss = datas['struct'][:4].to(device), datas['struct_label_seg'][:4].to(device)
                     ss = torch.eye(c, device= device)[ss.to(torch.long)]
-                    z_ = SGenDis.sample((2,)).to(device)
+                    z_ = SGenDis.sample((4,)).to(device)
                     z_ = z_[:, None, :].repeat(1, 32, 1)
                     fs, fp = fgen(z_, ss, sp)
                     for p, s in zip(fp, fs):
                         pltt.plot(p, s)
+    if max_epoch_stage1 == 0:
+        dic = dic = torch.load('SDs_1.pt')
+        sgen.load_state_dict(dic['sgenSD'])
+        fgen.load_state_dict(dic['fgenSD'])
+        sdis.load_state_dict(dic['sdisSD'])
+        fdis.load_state_dict(dic['fdisSD'])
+        # if idx % 128 == 127:
+        #     pltt.vis.text(f'epoch {idx} visualize')
+    with torch.no_grad():
+        # show generated structure cloud
+        # sgen_input = SGenDis.sample((8,)).to(device)
+        # z_, gss, gsp = sgen(sgen_input)
+        # print(gss.shape, gsp.shape)
+        # for p, s in zip(gsp, gss):
+        #     pltt.plot(p, s)
+        # show ground truth and generated final cloud
+        if True:
+            datas = train_data[:4]
+            for idx in range(4):
+                pltt.plot(datas['pts'][idx], datas['label_seg'][idx])
+                pltt.plot(datas['struct'][idx], datas['struct_label_seg'][idx])
+            sp, ss = datas['struct'][:4].to(device), datas['struct_label_seg'][:4].to(device)
+            ss = torch.eye(c, device= device)[ss.to(torch.long)]
+            z_ = SGenDis.sample((4,)).to(device)
+            z_ = z_[:, None, :].repeat(1, 32, 1)
+            fs, fp = fgen(z_, ss, sp)
+            for p, s in zip(fp, fs):
+                pltt.plot(p, s)
 
     print('stage 2')
     pltt.vis.text('stage 2')
